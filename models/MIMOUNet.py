@@ -266,6 +266,110 @@ class MIMOUNetPlus(nn.Module):
 
         return outputs
 
+    
+
+
+class DWTL2(nn.Module):
+    def __init__(self,num_res=20):
+        super(DWTL2,self).__init__()
+        base_channel = 32
+        self.fam = FAM(base_channel*2)
+        self.EB2 = EBlock(base_channel*2, num_res)
+        self.aff2 = AFF(7*base_channel,base_channel*2)
+        self.scm2 = SCM(out_plane=base_channel*2,in_plane=12)
+        self.model_l3 = DWTL3()
+        self.conv_trans = BasicConv(base_channel*4, base_channel*8, kernel_size=3, relu=True, stride=1)
+        self.conv_trans2 = BasicConv(base_channel*4, base_channel*2, kernel_size=3, relu=True, stride=1)
+        self.conv_trans3 = BasicConv(base_channel*2, 12, kernel_size=3, relu=True, stride=1)
+        self.conv_trans4 = BasicConv(base_channel*8, base_channel*4, kernel_size=3, relu=True, stride=1)
+        self.conv_trans5 = BasicConv(base_channel*4, base_channel*16, kernel_size=3, relu=True, stride=1)
+        slef.DB2 = DBlock(base_channel * 2, num_res)
+    
+    def forward(self,b2,l1_fea,b1_aff,b3):
+        x = self.scms(b2)
+        if l1_fea is not None:
+            x = self.fam(l1_fea,x)
+        x_aff2 = self.EB2(x)
+        x = dwt_init(x_aff)
+        x = self.conv_trans4(x)
+        x_fea3, x_dwt3, x_aff3 = self.DWTL3(b3,x)
+        x = self.conv_trans(x_fea3)
+        x = idwt_init(x)
+        x_aff3_l2 = idwt_init(self.conv_trans5(x_aff3))
+        if b1_aff is None:
+            b1_aff = torch.zeros((x_aff2.size()[0],base_channel,x_aff.size()[2],x_aff.size()[3])).float().cuda()
+        aff2_out = self.aff2(b1_aff,x_aff2,x_aff3_l2)
+        x = torch.cat((x,aff2_out),1)
+        x = self.conv_trans2(x)
+        x_fea2 = self.DB2(x)
+        x_dwt2 = self.conv_trans3(x_fea2)
+        return x_fea2, x_dwt2, x_aff2, x_aff3_l2, x_dwt3
+
+
+class DWTL3(nn.Module):
+    def __init__(self,num_res=20):
+        super(DWTL3,self).__init__()
+        base_channel=32
+        self.scm3 = SCM(out_plane=base_channel*4,in_plane=48)
+        self.fam = FAM(base_channel*4)
+        self.EB3 = EBlock(base_channel*4, num_res)
+        self.DB3 = DBlock(base_channel * 4, num_res)
+        self.conv_trans = BasicConv(base_channel*4, 48, kernel_size=3, relu=True, stride=1)
+
+    def forward(self,b3,l2_fea):
+        x = self.scm3(b3)
+        if l2_fea is not None:
+            x = self.fam(l2_fea, x)
+        x_aff3 = self.EB3(x)
+        x_fea3 = self.DB3(x_aff3)
+        x_dwt3 = self.conv_trans(x_fea3)
+        return x_fea3,x_dwt3,x_aff3
+
+
+class MIMOUNetPlusDWTv2(nn.Module):
+    def __init__(self, num_res = 20):
+        super(MIMOUNetPlusDWTv2, self).__init__()
+        base_channel = 32
+        self.extract_fea = BasicConv(3, base_channel, kernel_size=3, relu=True, stride=1)
+        self.EB1 = EBlock(base_channel, num_res)
+        self.conv_trans1 = BasicConv(base_channel*4, base_channel*2, kernel_size=3, relu=True, stride=1)
+        self.conv_trans2 = BasicConv(base_channel*4, base_channel, kernel_size=3, relu=True, stride=1)
+        self.conv_trans3 = BasicConv(base_channel*2, base_channel*8, kernel_size=3, relu=True, stride=1)
+        self.conv_trans4 = BasicConv(base_channel*4, base_channel*16, kernel_size=3, relu=True, stride=1)
+        self.conv_trans5 = BasicConv(base_channel*2, base_channel*4, kernel_size=3, relu=True, stride=1)
+        self.conv_trans6 = BasicConv(base_channel*2, base_channel, kernel_size=3, relu=True, stride=1)
+        self.conv_trans7 = BasicConv(base_channel, 3, kernel_size=3, relu=True, stride=1)
+        self.model_l2 = DWTL2()
+        self.aff1 = AFF(base_channel*7, base_channel)
+        self.DB1 = DBlock(base_channel, num_res)
+
+
+    def forward(self, x):
+        b1 = x
+        b2 = dwt_init(x)
+        b3 = dwt_init(b2)
+        x = self.extract_fea(b1)
+        x_aff1 = self.EB1(x)
+        x_dwt = dwt_init(x_aff1)
+        x_aff1_l2 = self.conv_trans2(x_dwt)
+        x = self.conv_trans1(x_aff1_l2)
+        l2_out = self.model_l2(b2,x,x_aff1_l2,b3)
+        x_fea2, x_dwt2, x_aff2, x_aff3_l2,x_dwt3 = l2_out
+        x_ = self.conv_trans5(x_fea2)
+        x_aff2_l1 = idwt_init(self.conv_trans3(x_aff2))
+        x_aff3_l1 = idwt_init(self.conv_trans4(x_aff3_l2))
+        x = self.aff1(x_aff1,x_aff2_l1,x_aff3_l1)
+        x = torch.cat((x_,x))
+        x = self.conv_trans6(x)
+        x = self.DB1(x)
+        x = self.conv_trans7(x)
+        outputs.append(x_dwt3+b3)
+        outputs.append(x_dwt2+b2)
+        outputs.append(x+b1)
+
+        return outputs
+
+    
 
 def build_net(model_name):
     class ModelError(Exception):
